@@ -375,12 +375,12 @@ Step 11 — Your GlassFlow Connection Details
 Once done, use these details in GlassFlow UI:
 
 Field			Value
-Host 			v51va6joof.ap-south-1.aws.clickhouse.cloud
+Host 			**********
 
 Native Port	9440
 HTTP Port 	8443
 Username 	glassflow_user
-Password 	GlassFlow@2024Strong 
+Password 	GlassFlow****** 
 Database 	glassflow 
 Table 		events
 SSL		true
