@@ -1,0 +1,716 @@
+GlassFlow with Kubernetes
+
+refer this links for installation
+https://kafka.apache.org/community/downloads/ https://docs.glassflow.dev/installation https://docs.glassflow.dev/installation/kubernetes
+https://docs.docker.com/engine/install/ubuntu/
+https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/
+
+STEP 1: System Update and Dependencies
+sudo apt-get update && sudo apt-get upgrade -y
+
+sudo apt-get install -y \
+    curl \
+    wget \
+    git \
+    vim \
+    htop \
+    net-tools \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    apt-transport-https \
+    software-properties-common \
+    unzip \
+    openjdk-17-jdk
+
+# verify Java:
+java -version
+
+
+
+STEP 2: Docker Installation
+
+# 2.1 - Remove any old Docker versions
+sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null
+
+# 2.2 - Add Docker's official GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# 2.3 - Add Docker repository
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 2.4 - Install Docker
+sudo apt-get update
+
+sudo apt-get install -y \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    docker-buildx-plugin \
+    docker-compose-plugin
+
+# 2.5 - Add your user to docker group
+sudo usermod -aG docker $USER
+newgrp docker
+
+# 2.6 - Verify Docker
+docker --version
+
+docker run hello-world
+
+STEP 3: Install kubectl
+
+# 3.1 - Download latest kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# 3.2 - Validate checksum
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl.sha256"
+
+echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+
+# 3.3 - Install kubectl
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+# 3.4 - Verify kubectl
+kubectl version --client
+
+
+STEP 4: Install Minikube
+# 4.1 - Download Minikube
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+
+# 4.2 - Install Minikube
+sudo install minikube-linux-amd64 /usr/local/bin/minikube
+
+# 4.3 - Verify Minikube
+minikube version
+
+# 4.4 - Start Minikube
+minikube start \
+    --driver=docker \
+    --cpus=4 \
+    --memory=8192 \
+    --disk-size=30g
+# 4.5 - Verify Minikube is running
+
+minikube status
+
+kubectl get nodes
+
+
+STEP 5: Install Helm
+        
+# 5.1 - Download and Install Helm
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# 5.2 - Verify Helm
+helm version
+
+STEP 6: Apache Kafka Installation (KRaft Mode - No Zookeeper)
+
+# 6.1 - Download Kafka 4.0.0 
+
+cd /tmp
+
+wget https://downloads.apache.org/kafka/4.0.1/kafka_2.13-4.0.1.tgz
+
+# 6.2 - Extract and Move
+tar -xzf kafka_2.13-4.0.1.tgz
+
+sudo mv kafka_2.13-4.0.1 /opt/kafka
+
+# 6.3 - Create Kafka Data Directory
+
+sudo mkdir -p /var/kafka/data
+
+sudo chown -R $USER:$USER /var/kafka
+
+sudo chown -R $USER:$USER /opt/kafka
+
+# 6.4 - Add Kafka to PATH
+
+echo 'export PATH=$PATH:/opt/kafka/bin' >> ~/.bashrc
+
+
+source ~/.bashrc
+
+# 6.5 - Verify
+
+ls /opt/kafka/bin/
+
+# 6.6 - Configure Kafka KRaft Mode
+# First get your EC2 Private IP
+hostname -I | awk '{print $1}'
+172.31.8.155
+
+# 6.7 - Update server.properties
+sudo cp /opt/kafka/config/server.properties /opt/kafka/config/server.properties.backup
+
+sudo sed -i 's|advertised.listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093|advertised.listeners=PLAINTEXT://172.31.8.155:9092|' /opt/kafka/config/server.properties
+
+sudo sed -i 's|log.dirs=/tmp/kraft-combined-logs|log.dirs=/var/kafka/data|' /opt/kafka/config/server.properties
+
+## Verify changes are correct
+grep -E "advertised.listeners|log.dirs" /opt/kafka/config/server.properties
+
+ubuntu@ip-172-31-8-155:/tmp$ grep -E "advertised.listeners|log.dirs" /opt/kafka/config/server.properties
+advertised.listeners=PLAINTEXT://172.31.8.155:9092
+log.dirs=/var/kafka/data
+ubuntu@ip-172-31-8-155:/tmp$
+
+
+# 6.8 - Generate Cluster UUID\
+
+KAFKA_CLUSTER_ID=$(/opt/kafka/bin/kafka-storage.sh random-uuid)
+echo $KAFKA_CLUSTER_ID
+
+# 6.9 - Format Kafka Storage
+/opt/kafka/bin/kafka-storage.sh format \
+    --config /opt/kafka/config/server.properties \
+    --cluster-id $KAFKA_CLUSTER_ID \
+    --standalone
+
+# 6.10 - Create Kafka Systemd Service
+sudo tee /etc/systemd/system/kafka.service << EOF
+[Unit]
+Description=Apache Kafka (KRaft mode)
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+Environment=JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+Environment=KAFKA_HEAP_OPTS=-Xmx4G -Xms2G
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
+ExecStop=/opt/kafka/bin/kafka-server-stop.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 6.11 - Start Kafka
+sudo systemctl daemon-reload
+sudo systemctl enable kafka
+sudo systemctl start kafka
+
+# 6.12 - Check Status
+sudo systemctl status kafka
+
+STEP 7: Kafka UI Installation
+# 7.1 - Create Kafka UI docker-compose file
+mkdir -p ~/kafka-ui
+
+tee ~/kafka-ui/docker-compose.yml << EOF
+version: '3'
+services:
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 172.31.8.155:9092
+    restart: unless-stopped
+EOF
+
+# 7.2 - Start Kafka UI
+cd ~/kafka-ui && docker compose up -d
+
+# 7.3 - Check Kafka UI is running
+docker ps
+
+# Quick Test - Create a Topic
+/opt/kafka/bin/kafka-topics.sh \
+    --bootstrap-server 172.31.8.155:9092 \
+    --create \
+    --topic orders \
+    --partitions 3
+
+/opt/kafka/bin/kafka-topics.sh \
+    --bootstrap-server 172.31.8.155:9092 \
+    --list
+
+
+STEP 8: GlassFlow Installation on Kubernetes via Helm
+
+# 8.1 - Add GlassFlow Helm Repository
+helm repo add glassflow https://glassflow.github.io/charts
+
+helm repo update
+
+helm search repo glassflow
+
+# Create namespace
+kubectl create namespace glassflow
+
+# Create values file
+tee ~/glassflow-values.yaml << 'EOF'
+nats:
+  enabled: true
+  config:
+    cluster:
+      enabled: false
+    jetstream:
+      enabled: true
+      fileStore:
+        enabled: true
+        dir: /data
+        pvc:
+          enabled: true
+          size: 5Gi
+          storageClassName: standard
+  container:
+    merge:
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "250m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+EOF
+
+# Install GlassFlow
+helm install glassflow glassflow/glassflow-etl \
+    --namespace glassflow \
+    --values glassflow-values.yaml \
+    --wait \
+    --timeout 10m
+
+# Verify installation
+kubectl get pods -n glassflow -w
+
+kubectl get services -n glassflow
+
+
+
+STEP 9: Access GlassFlow UI
+
+# Check GlassFlow UI Service
+
+kubectl get services -n glassflow
+
+# Expose GlassFlow UI using NodePort
+kubectl patch svc glassflow-ui \
+    -n glassflow \
+    -p '{"spec": {"type": "NodePort"}}'
+
+# Get the NodePort
+kubectl get svc glassflow-ui -n glassflow
+
+# Port Forward to access from browser
+
+kubectl port-forward svc/glassflow-ui \
+    --namespace glassflow \
+    --address 0.0.0.0 \
+    3000:8080 &
+
+# Verify
+curl http://localhost:3000
+
+http://65.2.0.111:3000
+
+Step 10 - Login To clickHouse Cloud
+
+
+# Create Database (if not exists)
+CREATE DATABASE IF NOT EXISTS glassflow;
+
+#  Create a Dedicated User for GlassFlow
+CREATE USER glassflow_user 
+IDENTIFIED BY 'GlassFlow@2024Strong' 
+HOST ANY;
+
+
+# Grant Required Permissions
+
+-- Grant access to glassflow database
+GRANT CREATE TABLE, DROP TABLE, INSERT, SELECT, ALTER ON glassflow.* TO glassflow_user;
+
+-- Grant show databases permission
+GRANT SHOW DATABASES ON *.* TO glassflow_user;
+
+-- Grant show tables permission  
+GRANT SHOW TABLES ON glassflow.* TO glassflow_user;
+
+
+# Create the Events Table
+CREATE TABLE IF NOT EXISTS glassflow.events (
+    id           String,
+    user_id      String,
+    event_type   String,
+    amount       Float64,
+    status       String,
+    country      String,
+    timestamp    String,
+    created_at   DateTime64(3) DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (id);
+
+# Verify User and Table
+
+-- Check user exists
+SHOW USERS;
+
+-- Check table exists
+SHOW TABLES IN glassflow;
+
+-- Test user permissions
+SHOW GRANTS FOR glassflow_user;
+
+
+Step 11 — Your GlassFlow Connection Details
+Once done, use these details in GlassFlow UI:
+
+Field			Value
+Host 			v51va6joof.ap-south-1.aws.clickhouse.cloud
+
+Native Port	9440
+HTTP Port 	8443
+Username 	glassflow_user
+Password 	GlassFlow@2024Strong 
+Database 	glassflow 
+Table 		events
+SSL		true
+
+# First Create a Kafka Topic
+/opt/kafka/bin/kafka-topics.sh \
+    --bootstrap-server 172.31.8.155:9092 \
+    --create \
+    --topic events \
+    --partitions 3
+
+/opt/kafka/bin/kafka-topics.sh \
+    --bootstrap-server 172.31.8.155:9092 \
+    --list
+
+# Send Sample Data to Kafka
+/opt/kafka/bin/kafka-console-producer.sh \
+    --bootstrap-server 172.31.8.155:9092 \
+    --topic events
+
+{"id":"evt-001","user_id":"usr-123","event_type":"purchase","amount":250.50,"status":"completed","country":"US","timestamp":"2024-01-15T10:30:00.000Z"}
+
+
+Step 12 - Create Pipeline
+
+# Setup Kafka Connection
+Authentication Method - No Authentication
+
+Security Protocol - Plaintext
+
+Bootstrap Server - 172.31.8.155:9092 
+
+# Select Topic:
+Source Topic - events
+
+# Define Deduplicate Keys
+The deduplicate key will be used to detect and remove duplicate data in your pipeline.
+
+de-duplicate key - id
+
+Info
+1 - Hours
+
+
+# Define Filter Conditions
+Filter Rule 1:                                         │
+│  Field:     amount                                      │
+│  Operator:  greater than                                │
+│  Value:     0    
+
+Filter Rule 2:                                         │
+│  Field:     status                                      │
+│  Operator:  equals                                      │
+│  Value:     completed  
+
+# Pipeline Resources
+
+Configure CPU, memory, and storage for each pipeline component.
+NATS Stream
+24h
+Use duration format, e.g. 24h, 1m, 30s
+
+0
+Use format like 10Gi, 100GB, or 1TB
+
+Ingestor
+100m
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+100Mi
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+500m
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+750Mi
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+1
+Positive integer, e.g. 1
+
+Sink
+100m
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+100Mi
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+500m
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+1.5Gi
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+1
+Positive integer, e.g. 1
+
+Transform / Dedup
+100m
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+256Mi
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+500m
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+512Mi
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+1
+Positive integer, e.g. 1
+
+5Gi
+Use Kubernetes format, e.g. 100m, 1Gi, 128Mi
+
+
+Step 13 - Send Test Events to Kafka
+
+/opt/kafka/bin/kafka-console-producer.sh \
+    --bootstrap-server 172.31.8.155:9092 \
+    --topic events
+
+
+# Message 1 - Valid (should pass filter):
+
+{"id":"evt-001","user_id":"usr-123","event_type":"purchase","amount":250.50,"status":"completed","country":"US","timestamp":"2024-01-15T10:30:00.000Z"}
+
+# Message 2 - Valid (should pass filter):
+{"id":"evt-002","user_id":"usr-456","event_type":"purchase","amount":99.99,"status":"completed","country":"UK","timestamp":"2024-01-15T10:31:00.000Z"}
+
+# Message 3 - Duplicate of Message 1 (should be deduplicated):
+{"id":"evt-001","user_id":"usr-123","event_type":"purchase","amount":250.50,"status":"completed","country":"US","timestamp":"2024-01-15T10:30:00.000Z"}
+
+# Message 4 - Should be filtered (amount = 0):
+{"id":"evt-004","user_id":"usr-789","event_type":"click","amount":0,"status":"completed","country":"DE","timestamp":"2024-01-15T10:32:00.000Z"}
+
+# Message 5 - Should be filtered (status != completed):
+{"id":"evt-005","user_id":"usr-321","event_type":"purchase","amount":500.00,"status":"pending","country":"IN","timestamp":"2024-01-15T10:33:00.000Z"}
+
+# Message 6 - Valid (should pass):
+{"id":"evt-006","user_id":"usr-654","event_type":"purchase","amount":750.00,"status":"completed","country":"AU","timestamp":"2024-01-15T10:34:00.000Z"}
+
+### Now Check ClickHouse
+-- Check how many records arrived
+SELECT count() FROM glassflow.events;
+
+
+-- See all records
+SELECT * FROM glassflow.events;
+
+
+-- Verify deduplication worked
+SELECT id, count() as occurrences 
+FROM glassflow.events 
+GROUP BY id 
+ORDER BY occurrences DESC;
+
+
+-- Verify filter worked (no amount=0, no status=pending)
+SELECT id, amount, status 
+FROM glassflow.events;
+
+TRUNCATE TABLE glassflow.events;
+
+
+
+
+# Startup Script Before Stopping the instance
+
+tee ~/startup.sh << 'EOF'
+#!/bin/bash
+echo "Starting all services..."
+
+# Start Kafka
+sudo systemctl start kafka
+echo "Kafka started"
+sleep 5
+
+# Start Kafka UI
+cd ~/kafka-ui && docker compose up -d
+echo "Kafka UI started"
+sleep 3
+
+# Start Minikube
+minikube start --driver=docker --cpus=2 --memory=6144
+echo "Minikube started"
+sleep 30
+
+# Check GlassFlow pods
+kubectl get pods -n glassflow
+sleep 5
+
+# Start GlassFlow UI port forward
+nohup kubectl port-forward svc/glassflow-ui \
+    --namespace glassflow \
+    --address 0.0.0.0 \
+    3000:8080 > ~/glassflow-ui-forward.log 2>&1 &
+
+echo ""
+echo "All services started!"
+echo "Kafka UI:     http://65.2.0.111:8080"
+echo "GlassFlow UI: http://65.2.0.111:3000"
+EOF
+
+
+chmod +x ~/startup.sh
+
+# Run Startup Script
+bash ~/startup.sh
+
+# Verify Everything is Running
+# Check Kafka
+sudo systemctl status kafka
+
+# Check Kafka UI container
+docker ps
+
+# Check Minikube
+minikube status
+
+# Check GlassFlow pods
+kubectl get pods -n glassflow
+
+
+
+# To send the message 
+python3 ~/throughput_test.py
+
+python3 ~/throughput_3min.py
+
+python3 ~/throughput_with_duplicates.py
+
+
+
+Why do we need glassflow ? which use case we used? what kind of use cases we can use with glassflow?
+
+Why do we need GlassFlow?
+GlassFlow is used when you have streaming data in Kafka and you want to land clean, analytics-ready data in ClickHouse (or other destinations) without writing and operating custom consumer applications.
+
+In practice, teams struggle with:
+
+Writing/maintaining Kafka consumer services for every pipeline
+Handling retries, batching, ordering, backpressure
+Managing deduplication state (idempotency) correctly
+Handling bad messages (DLQ), schema drift, and failures safely
+Scaling consumers and monitoring lag/throughput
+Making changes quickly (filters, mapping, enrichment) without redeploying code
+GlassFlow provides a pipeline layer (middleware) that does this operational work for you, and you configure pipelines via UI / Kubernetes deployment.
+
+Which use case did we use in our demo?
+In our demo we used this real production-style use case:
+
+Kafka → GlassFlow → ClickHouse Cloud
+With a pipeline configured as:
+
+Source: External Kafka topic (events)
+Operation: Deduplication (key = id, time window = 1 hour)
+(Optional) Filter: We experimented with filters; the key learning was GlassFlow filter UI rules are for excluding matching events.
+Sink: ClickHouse Cloud table (glassflow.events)
+We then ran a high-throughput benchmark (3 minutes) and verified per-minute inserts in ClickHouse.
+So our demo use case is basically:
+
+“High-throughput real-time ingestion to ClickHouse Cloud with built-in dedup and managed pipeline operations.”
+
+What kinds of use cases can we use GlassFlow for?
+Here are the main practical categories (especially relevant for Kafka + ClickHouse):
+
+1) Real-time ETL / Streaming ingestion into ClickHouse
+Stream events from Kafka into ClickHouse Cloud reliably
+Automatic batching, buffering, retries, and controlled inserts
+Great for analytics dashboards, product analytics, observability events
+2) Deduplication / Idempotency (very common in Kafka)
+Typical problem: producers retry and duplicate events are produced.
+GlassFlow can:
+
+Drop duplicates based on a key (event_id, order_id, txn_id)
+Use a time window to manage memory/state
+Use cases:
+Payments/transactions
+Orders/events pipelines
+IoT device telemetry
+3) Filtering / Data Quality gates
+Use cases:
+
+Drop test events
+Drop invalid status values
+Drop null/empty required fields
+Allow only certain countries/tenants
+This reduces storage cost and improves analytics correctness.
+Important: in GlassFlow UI, filter rules are usually “exclude events that match”. So you write rules like “exclude amount == 0” rather than “allow amount > 0”.
+
+4) Transformations / Field mapping / Normalization
+Use cases:
+
+Rename fields from Kafka to match ClickHouse columns
+Convert types / set defaults
+Add derived fields (e.g., amount_bucket, is_high_value)
+Keep a consistent schema as upstream evolves
+5) Joins / Enrichment (when supported in your pipeline type)
+Use cases:
+
+Join order events with user/profile stream
+Enrich with dimension data (plan tier, region, device metadata)
+Temporal joins (lookup “latest known value” within time window)
+6) Error handling + DLQ + Observability
+Use cases:
+
+Bad JSON, schema mismatch, ClickHouse insertion error
+Route failures to DLQ for later analysis/replay
+Monitor throughput, processing latency, and pipeline health from UI
+7) Reprocessing / Backfill scenarios
+Use cases:
+
+Start from earliest offset to reprocess a topic into a new ClickHouse table
+Useful for rebuilding analytics tables after schema changes or bug fixes
+Summary (1-liner)
+We use GlassFlow to build production-grade streaming pipelines (Kafka → ClickHouse) with dedup/filter/transform/join and operational reliability, without writing and operating custom consumer services.
+
+If you want, I can tailor this into a short “client-facing explanation” and a separate “engineering explanation” for internal documentation.
+
+
+transformerations
+ schema evolution
+dlq
+
+transformation with joins, state storage.
+where are the deduplicated values
+
+1.change script duplicate values to insert
+2. validate which are the deduplicate records identification
+
+
